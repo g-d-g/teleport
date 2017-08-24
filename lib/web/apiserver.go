@@ -20,7 +20,6 @@ package web
 
 import (
 	"compress/gzip"
-	//"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1218,7 +1217,7 @@ func (m *Handler) siteNodeConnect(
 	req.ProxyHostPort = m.ProxyHostPort()
 	req.Cluster = site.GetName()
 
-	clt, err := ctx.GetClient()
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
