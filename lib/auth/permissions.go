@@ -96,6 +96,7 @@ func (a *authorizer) Authorize(ctx context.Context) (*AuthContext, error) {
 		return nil, trace.AccessDenied("missing authentication context")
 	}
 	userI := ctx.Value(teleport.ContextUser)
+	//fmt.Printf("Authorize: %#v\n", userI)
 	switch user := userI.(type) {
 	case teleport.LocalUser:
 		return a.authorizeLocalUser(user)

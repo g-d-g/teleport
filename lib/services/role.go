@@ -49,8 +49,10 @@ var DefaultUserRules = map[string][]string{
 var DefaultImplicitRules = map[string][]string{
 	KindNode:          RO(),
 	KindAuthServer:    RO(),
+	KindClusterName:   RO(),
 	KindReverseTunnel: RO(),
 	KindCertAuthority: RO(),
+	KindEvent:         RO(),
 }
 
 // DefaultCertAuthorityRules provides access the minimal set of resources
@@ -1232,6 +1234,8 @@ func (set RoleSet) String() string {
 }
 
 func (set RoleSet) CheckAccessToRule(namespace string, resource string, verb string) error {
+	//fmt.Printf("CheckAccessToRule: %v:%v: %v\n", resource, verb, set)
+
 	// check deny: a single match on a deny rule prohibits access
 	for _, role := range set {
 		matchNamespace := MatchNamespace(role.GetNamespaces(Deny), ProcessNamespace(namespace))

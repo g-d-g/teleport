@@ -20,6 +20,7 @@ package web
 
 import (
 	"compress/gzip"
+	//"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tstranex/u2f"
+	"golang.org/x/crypto/ssh"
 )
 
 // Handler is HTTP web proxy handler
@@ -169,6 +171,8 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	// get namespaces
 	h.GET("/webapi/sites/:site/namespaces", h.WithClusterAuth(h.getSiteNamespaces))
 
+	////////////////////////////////////////////////////////////////////////
+
 	// get nodes
 	h.GET("/webapi/sites/:site/namespaces/:namespace/nodes", h.WithClusterAuth(h.getSiteNodes))
 	// connect to node via websocket (that's why it's a GET method)
@@ -179,16 +183,19 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	h.POST("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionGenerate))
 	// update session parameters
 	h.PUT("/webapi/sites/:site/namespaces/:namespace/sessions/:sid", h.WithClusterAuth(h.siteSessionUpdate))
+	// get session's events
+	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/events", h.WithClusterAuth(h.siteSessionEventsGet))
+	// search site events
+	h.GET("/webapi/sites/:site/events", h.WithClusterAuth(h.siteEventsGet))
+
 	// get the session list
 	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionsGet))
 	// get a session
 	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid", h.WithClusterAuth(h.siteSessionGet))
-	// get session's events
-	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/events", h.WithClusterAuth(h.siteSessionEventsGet))
 	// get session's bytestream
 	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/stream", h.siteSessionStreamGet)
-	// search site events
-	h.GET("/webapi/sites/:site/events", h.WithClusterAuth(h.siteEventsGet))
+
+	////////////////////////////////////////////////////////////////////////
 
 	// OIDC related callback handlers
 	h.GET("/webapi/oidc/login/web", httplib.MakeHandler(h.oidcLoginWeb))
@@ -1069,12 +1076,14 @@ Sucessful response:
 
 {"namespaces": [{..namespace resource...}]}
 */
-func (m *Handler) getSiteNamespaces(w http.ResponseWriter, r *http.Request, _ httprouter.Params, c *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
+func (m *Handler) getSiteNamespaces(w http.ResponseWriter, r *http.Request, _ httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
 	log.Debugf("[web] GET /namespaces")
-	clt, err := site.GetClient()
+
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
+
 	namespaces, err := clt.GetNamespaces()
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -1126,6 +1135,7 @@ Sucessful response:
   ]
 }
 */
+//func (m *Handler) getSiteNodes(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
 func (m *Handler) getSiteNodes(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
 	log.Debugf("[web] GET /nodes")
 	clt, err := site.GetClient()
@@ -1365,8 +1375,42 @@ type siteSessionsGetResponse struct {
 // Response body:
 //
 // {"sessions": [{"id": "sid", "terminal_params": {"w": 100, "h": 100}, "parties": [], "login": "bob"}, ...] }
+
+func getUserCredentials(agent auth.AgentCloser) (string, ssh.AuthMethod, error) {
+	var (
+		cert *ssh.Certificate
+		pub  ssh.PublicKey
+	)
+	// this loop-over-keys is only needed to find an ssh.Certificate (so we can pull
+	// the 1st valid principal out of it)
+	keys, err := agent.List()
+	if err != nil {
+		return "", nil, trace.Wrap(err)
+	}
+	for _, k := range keys {
+		pub, _, _, _, err = ssh.ParseAuthorizedKey([]byte(k.String()))
+		if err != nil {
+			log.Warn(err)
+			continue
+		}
+		cert, _ = pub.(*ssh.Certificate)
+		if cert != nil {
+			break
+		}
+	}
+	// take the principal (SSH username) out of the returned certificate
+	if cert == nil {
+		return "", nil, trace.Errorf("unable to retreive the user certificate")
+	}
+	signers, err := agent.Signers()
+	if err != nil {
+		return "", nil, trace.Wrap(err)
+	}
+	return cert.ValidPrincipals[0], ssh.PublicKeys(signers...), nil
+}
+
 func (m *Handler) siteSessionsGet(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
-	clt, err := site.GetClient()
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1397,7 +1441,8 @@ func (m *Handler) siteSessionGet(w http.ResponseWriter, r *http.Request, p httpr
 		return nil, trace.Wrap(err)
 	}
 	log.Infof("web.getSetssion(%v)", sessionID)
-	clt, err := site.GetClient()
+
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1431,11 +1476,12 @@ func (m *Handler) siteEventsGet(w http.ResponseWriter, r *http.Request, p httpro
 	query := r.URL.Query()
 	log.Infof("web.getEvents(%v)", r.URL.RawQuery)
 
-	clt, err := site.GetClient()
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		log.Error(err)
 		return nil, trace.Wrap(err)
 	}
+
 	to := time.Now().In(time.UTC)
 	from := to.AddDate(0, -1, 0) // one month ago
 
@@ -1488,7 +1534,7 @@ func (m *Handler) siteSessionStreamGet(w http.ResponseWriter, r *http.Request, p
 		trace.WriteError(w, err)
 	}
 	// authenticate first:
-	_, err := m.AuthenticateRequest(w, r, true)
+	ctx, err := m.AuthenticateRequest(w, r, true)
 	if err != nil {
 		log.Info(err)
 		// clear session just in case if the authentication request is not valid
@@ -1517,11 +1563,19 @@ func (m *Handler) siteSessionStreamGet(w http.ResponseWriter, r *http.Request, p
 		onError(trace.Wrap(err))
 		return
 	}
-	clt, err := site.GetClient()
+
+	//clt, err := site.GetClient()
+	//if err != nil {
+	//	onError(trace.Wrap(err))
+	//	return
+	//}
+
+	clt, err := clientFromSite(ctx, site)
 	if err != nil {
 		onError(trace.Wrap(err))
 		return
 	}
+
 	// look at 'offset' parameter
 	query := r.URL.Query()
 	offset, _ := strconv.Atoi(query.Get("offset"))
@@ -1541,6 +1595,7 @@ func (m *Handler) siteSessionStreamGet(w http.ResponseWriter, r *http.Request, p
 		onError(trace.BadParameter("invalid namespace %q", namespace))
 		return
 	}
+
 	// call the site API to get the chunk:
 	bytes, err := clt.GetSessionChunk(namespace, *sid, offset, max)
 	if err != nil {
@@ -1751,8 +1806,85 @@ func (h *Handler) WithClusterAuth(fn ClusterHandler) httprouter.Handle {
 			log.Warn(err)
 			return nil, trace.Wrap(err)
 		}
+
 		return fn(w, r, p, ctx, site)
 	})
+}
+
+func clientFromSite(ctx *SessionContext, site reversetunnel.RemoteSite) (auth.ClientI, error) {
+	// get the name of the current cluster
+	lclt, err := ctx.GetClient()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	cn, err := lclt.GetClusterName()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// if we're trying to access the local cluster, pass back the local client.
+	// the local client will have the appropriate role.
+	// TODO(russjones): Check this ^^^.
+	if cn.GetClusterName() == site.GetName() {
+		clt, err := site.GetClient()
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		return clt, nil
+	}
+
+	// we're trying to access a remote cluster, get a client with the role this
+	// user will assume on the remote cluster.
+	clt, err := remoteClient(ctx, site)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return clt, nil
+}
+
+func remoteClient(ctx *SessionContext, site reversetunnel.RemoteSite) (auth.ClientI, error) {
+	sshDialer := func(network, addr string) (net.Conn, error) {
+		srcAddr := utils.NetAddr{Addr: "with-cluster-auth-handler", AddrNetwork: "tcp"}
+		dstAddr := utils.NetAddr{Addr: "@authserver:123", AddrNetwork: "tcp"}
+
+		netConn, err := site.Dial(&srcAddr, &dstAddr)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		agent, err := ctx.GetAgent()
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		principal, authMethods, err := getUserCredentials(agent)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		config := &ssh.ClientConfig{
+			User:    principal,
+			Auth:    []ssh.AuthMethod{authMethods},
+			Timeout: defaults.DefaultDialTimeout,
+		}
+		sshConn, sshChans, sshReqs, err := ssh.NewClientConn(netConn, "@authserver:123", config)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		client := ssh.NewClient(sshConn, sshChans, sshReqs)
+
+		return client.Dial(network, addr)
+	}
+
+	clt, err := auth.NewClient("http://stub:0", sshDialer)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return clt, nil
 }
 
 // WithAuth ensures that request is authenticated

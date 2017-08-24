@@ -237,6 +237,15 @@ func (a *Agent) proxyTransport(ch ssh.Channel, reqC <-chan *ssh.Request) {
 	server := string(req.Payload)
 	log.Infof("got out of band request %v", server)
 
+	if server == "@authserver:123" {
+		authServers, err := a.clt.GetAuthServers()
+		if err != nil {
+			a.log.Errorf("unable to find auth servers: %v", err)
+			return
+		}
+		server = authServers[0].GetAddr()
+	}
+
 	conn, err := net.Dial("tcp", server)
 	if err != nil {
 		log.Error(trace.DebugReport(err))

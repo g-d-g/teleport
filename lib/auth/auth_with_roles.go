@@ -60,9 +60,6 @@ func (a *AuthWithRoles) GetSessions(namespace string) ([]session.Session, error)
 	if err := a.action(namespace, services.KindSession, services.VerbList); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if err := a.action(namespace, services.KindSession, services.VerbRead); err != nil {
-		return nil, trace.Wrap(err)
-	}
 
 	return a.sessions.GetSessions(namespace)
 }
@@ -191,9 +188,9 @@ func (a *AuthWithRoles) GetNodes(namespace string) ([]services.Server, error) {
 	if err := a.action(namespace, services.KindNode, services.VerbList); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if err := a.action(namespace, services.KindNode, services.VerbRead); err != nil {
-		return nil, trace.Wrap(err)
-	}
+	//if err := a.action(namespace, services.KindNode, services.VerbRead); err != nil {
+	//	return nil, trace.Wrap(err)
+	//}
 	return a.authServer.GetNodes(namespace)
 }
 
@@ -672,12 +669,13 @@ func (a *AuthWithRoles) GetSessionEvents(namespace string, sid session.ID, after
 }
 
 func (a *AuthWithRoles) SearchEvents(from, to time.Time, query string) ([]events.EventFields, error) {
-	if err := a.action(defaults.Namespace, services.KindEvent, services.VerbRead); err != nil {
-		return nil, trace.Wrap(err)
-	}
 	if err := a.action(defaults.Namespace, services.KindEvent, services.VerbList); err != nil {
 		return nil, trace.Wrap(err)
 	}
+	if err := a.action(defaults.Namespace, services.KindSession, services.VerbList); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	return a.alog.SearchEvents(from, to, query)
 }
 
